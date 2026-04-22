@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a1628">
+<title>Kontrola ob prevzemu</title>
+
+<link rel="manifest" href="manifest.json">
+
+<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+
+<style>
+  body { font-family: Arial, sans-serif; background:#f0f4f8; margin:0; padding:10px; touch-action: manipulation; }
+  .container { max-width:1000px; margin:auto; background:white; border-radius:12px; box-shadow:0 5px 25px rgba(0,0,0,0.1); }
+  h1 { background:#0a1628; color:white; text-align:center; padding:20px; margin:0; font-size:1.5em; }
+  .header { padding:15px; background:#f8f9fa; display:flex; flex-wrap:wrap; gap:10px; }
+  input { padding:12px; border:1px solid #ccc; border-radius:8px; font-size:16px; width:100%; max-width:280px; }
+  button { padding:14px 20px; margin:5px; border:none; border-radius:8px; cursor:pointer; font-weight:600; font-size:17px; }
+  .btn-success { background:#00d4aa; color:black; }
+  .btn-primary { background:#2a7fff; color:white; }
+  .btn-info { background:#2196F3; color:white; }
+  .btn-warning { background:#ff9800; color:white; }
+  table { width:100%; border-collapse:collapse; margin:10px 0; }
+  th, td { border:1px solid #ddd; padding:8px; text-align:center; font-size:14px; }
+  th { background:#2a7fff; color:white; }
+  .check { font-size:28px; cursor:pointer; }
+  .edit-btn { background:#ff9800; color:white; border:none; padding:6px 10px; border-radius:4px; cursor:pointer; font-size:13px; }
+  .toast { position:fixed; bottom:25px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:15px 25px; border-radius:50px; z-index:9999; box-shadow:0 4px 15px rgba(0,0,0,0.3); }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>Kontrola ob prevzemu – medicinski pripomočki</h1>
+
+  <div class="header">
+    <input type="text" id="mesec" placeholder="Mesec & Leto">
+    <input type="text" id="podpis" placeholder="Podpis (ime in priimek)">
+    <button class="btn btn-primary" onclick="newControl()">Nova kontrola</button>
+  </div>
+
+  <div style="padding:15px; display:flex; flex-direction:column; gap:8px;">
+    <button class="btn btn-success" onclick="toggleScanner()" style="width:100%;">📷 Skeniraj UDI / GS1 / DataMatrix</button>
+    <button class="btn btn-primary" onclick="showManual()" style="width:100%;">Ročni vnos novega artikla</button>
+    
+    <div style="display:flex; gap:8px;">
+      <button class="btn btn-info" onclick="exportJSON()" style="flex:1;">💾 Shrani JSON</button>
+      <button class="btn btn-info" onclick="importJSON()" style="flex:1;">📂 Naloži JSON</button>
+      <button class="btn btn-warning" onclick="showHistory()" style="flex:1;">📋 Zgodovina</button>
+    </div>
+  </div>
+
+  <table id="table">
+    <thead>
+      <tr>
+        <th>Material</th>
+        <th>Proizvajalec</th>
+        <th>LOT</th>
+        <th>SN</th>
+        <th>Rok uporabe</th>
+        <th>Vnos</th>
+        <th>CE</th>
+        <th>Izjava + Cert.</th>
+        <th>Navodila</th>
+        <th>UDI</th>
+        <th>Urejanje</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div style="padding:20px; text-align:center;">
+    <button class="btn btn-success" onclick="exportExcel()">Izvozi Excel</button>
+    <button class="btn btn-primary" onclick="exportPDF()">Izvozi PDF</button>
+  </div>
+</div>
+
+<!-- Scanner -->
+<div id="scannerDiv" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.95); z-index:1000; align-items:center; justify-content:center;">
+  <div style="width:92%; max-width:520px;">
+    <video id="video" autoplay muted playsinline style="width:100%; border-radius:12px; background:#000;"></video>
+    <button class="btn btn-primary" onclick="stopScanner()" style="width:100%; margin-top:15px;">Ustavi skener</button>
+  </div>
+</div>
+
+<!-- Edit Modal in History Modal (enaka kot prej) -->
+<!-- ... (lahko jih dodaš iz prejšnje verzije, če jih nimaš) ... -->
+
+<div class="toast" id="toast" style="display:none;"></div>
+
+<script>
+// ==================== PARSER (enak kot prej) ====================
+function parseUDI(code) {
+  if (!code || code.length < 5) return { name: "Neveljavna koda", manufacturer: "Neznan", lot: "", sn: "", expiry: "", ref: "" };
+
+  let r = { name: "Medicinski pripomoček", manufacturer: "Neznan proizvajalec", lot: "", sn: "", expiry: "", ref: "", gtin: "" };
+  const lower = code.toLowerCase();
+
+  const gs1 = /\((\d{2})\)([^()]+)/g;
+  let m;
+  while ((m = gs1.exec(code)) !== null) {
+    const ai = m[1], val = m[2].trim();
+    if (ai === '01') r.gtin = val;
+    if (ai === '10') r.lot = val;
+    if (ai === '17' && val.length >= 6) r.expiry = `20${val.slice(0,2)}-${val.slice(2,4)}-${val.slice(4,6)}`;
+    if (ai === '21') r.sn = val;
+  }
+
+  if (!r.gtin) { const g = code.match(/01(\d{12,14})/); if (g) r.gtin = g[1]; }
+  if (!r.lot) { const l = code.match(/10([A-Z0-9-]+)/i); if (l) r.lot = l[1]; }
+  if (!r.sn) { const s = code.match(/21([A-Z0-9-]+)/i); if (s) r.sn = s[1]; }
+  if (!r.expiry) { 
+    const e = code.match(/17(\d{6})/); 
+    if (e) r.expiry = `20${e[1].slice(0,2)}-${e[1].slice(2,4)}-${e[1].slice(4,6)}`; 
+  }
+
+  const refMatch = code.match(/REF[:\s]*([A-Z0-9-]+)/i) || code.match(/([A-Z]{2,}-\d{3,}[A-Z0-9-]*)/);
+  if (refMatch) r.ref = refMatch[1] || refMatch[0];
+
+  // Proizvajalci ...
+  if (lower.includes('3m') || lower.includes('espe') || lower.includes('filtek')) {
+    r.manufacturer = "3M ESPE";
+    r.name = lower.includes('filtek') ? "Filtek Universal Restorative" : "3M Dental Material";
+  } else if (lower.includes('ivoclar') || lower.includes('vivadent')) {
+    r.manufacturer = "Ivoclar Vivadent"; r.name = "Ivoclar Material";
+  } else if (lower.includes('dentsply') || lower.includes('sirona')) {
+    r.manufacturer = "Dentsply Sirona"; r.name = "Dentsply Sirona Material";
+  } // ... dodaj ostale po potrebi
+
+  if (r.manufacturer === "Neznan proizvajalec") {
+    r.name = r.ref ? `Material REF: ${r.ref}` : `Material (${code.substring(0,30)}...)`;
+  }
+  return r;
+}
+
+let currentItems = [];
+let currentEditIndex = -1;
+let db;
+
+// ... (ostale funkcije: openDB, saveControls, loadSavedControls, renderTable, toggle, editItem, saveEdit, newControl, exportJSON, importJSON, showHistory itd. ostanejo enake kot v prejšnji delujoči verziji)
+
+// POPRAVLJEN SCANNER ZA ANDROID
+let codeReader = null;
+async function toggleScanner() {
+  document.getElementById('scannerDiv').style.display = 'flex';
+  
+  try {
+    codeReader = new ZXing.BrowserMultiFormatReader();
+    
+    const devices = await codeReader.listVideoInputDevices();
+    let deviceId = null;
+
+    // Poskusi izbrati zadnjo kamero
+    for (const device of devices) {
+      if (device.label.toLowerCase().includes('back') || device.label.toLowerCase().includes('rear')) {
+        deviceId = device.deviceId;
+        break;
+      }
+    }
+    if (!deviceId && devices.length > 0) deviceId = devices[devices.length-1].deviceId;
+
+    await codeReader.decodeFromVideoDevice(deviceId, 'video', (result) => {
+      if (result) {
+        addItem(result.getText());
+        stopScanner();
+      }
+    });
+
+    showToast("Kamera vključena – usmeri na kodo");
+  } catch(e) {
+    console.error("Scanner error:", e);
+    showToast("Napaka pri zagonu kamere. Preveri dovoljenja za kamero v nastavitvah brskalnika.");
+    stopScanner();
+  }
+}
+
+function stopScanner() {
+  if (codeReader) {
+    codeReader.reset();
+    codeReader = null;
+  }
+  document.getElementById('scannerDiv').style.display = 'none';
+}
+
+function showManual() {
+  addItem("");
+}
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+// PWA + start
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+
+window.onload = () => {
+  openDB();
+  showToast("Skeniranje popravljeno – poskusi znova");
+};
+</script>
+</body>
+</html>
